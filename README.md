@@ -12,18 +12,20 @@ This repo contains the `fill_form.py` tool we use to gather shipment/package det
 
 2) Pick or create a folder to hold the tool (anywhere is fine), then clone the repo:
    ```bash
-   git clone https://github.com/FernandoSHQ/Fill-Forms.git
+   git clone https://github.com/FerniGit/Fill-Forms.git
    cd /path/to/Fill-Forms   # replace with where you cloned
    ```
 3) Install deps if needed:
    ```bash
    pip install -r requirements.txt
    ```
-4) From the ops-tools directory, link `findlog.sh` (so `fill_form.py` can auto-fetch logs by transaction ID):
+4) From the ops-tools directory, link the helper scripts needed by `fill_form.py` (so it can auto-fetch logs by transaction ID):
    ```bash
-   cd /path/to/ops-tools           # the folder that has findlog.sh
-   ln -s "$(pwd)/findlog.sh" /path/to/Fill-Forms/findlog.sh
-   chmod +x "$(pwd)/findlog.sh"
+   cd /path/to/ops-tools           # the folder that has findlog.sh, split_logs.sh, log_trimmer.sh
+   ln -s "$(pwd)/findlog.sh"      /path/to/Fill-Forms/findlog.sh
+   ln -s "$(pwd)/split_logs.sh"   /path/to/Fill-Forms/split_logs.sh
+   ln -s "$(pwd)/log_trimmer.sh"  /path/to/Fill-Forms/log_trimmer.sh
+   chmod +x "$(pwd)/findlog.sh" "$(pwd)/split_logs.sh" "$(pwd)/log_trimmer.sh"
    ```
    Replace `/path/to/Fill-Forms` with where you cloned in step 2.
 5) (Optional) Add the Fill-Forms folder to your PATH so you can run `fill_form.py` from anywhere:
