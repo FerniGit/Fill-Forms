@@ -269,6 +269,19 @@ def json_contains_carrier_groups(obj) -> bool:
 #   LOG PARSING (REQUEST / RESPONSE)
 # ======================================================================
 
+_LOG_TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)')
+
+
+def extract_log_timestamp(lines):
+    """Return the earliest timestamp from a [NO SESSION FOUND] line, or None."""
+    for line in lines:
+        if "[NO SESSION FOUND]" in line:
+            m = _LOG_TS_RE.match(line)
+            if m:
+                return m.group(1)
+    return None
+
+
 def parse_log_file(path):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
@@ -416,6 +429,7 @@ def parse_log_file(path):
 
     result = extract_fields(request_json, response_json)
     result["Platform"] = platform
+    result["LogTimestamp"] = extract_log_timestamp(lines)
     return result
 
 
@@ -759,8 +773,12 @@ def generate_report(summary):
     methods_section = "\n\n".join(method_sections) if method_sections else "No carrier services returned."
 
     platform = summary.get("Platform", "Unknown")
+    log_ts = summary.get("LogTimestamp") or "N/A"
 
     return f"""
+=== Request Timestamp ===
+{log_ts}
+
 === Platform ===
 {platform}
 
@@ -843,51 +861,52 @@ def find_latest_shipperws_log(base_dir, token):
 
 def process_one(tid, script_dir):
     """
-    Fetch logs for a single SHQ transaction ID, parse, and return the report
-    string.  Returns None on failure.
+    Fetch logs for a single SHQ transaction ID, parse, and return
+    (report_str, log_timestamp) or (None, None) on failure.
     """
     findlog_path = os.path.join(script_dir, "findlog.sh")
     if not os.path.isfile(findlog_path):
         print(f"Cannot find findlog.sh at {findlog_path}")
-        return None
+        return None, None
 
     print(f"\nFetching logs via findlog.sh for {tid} ...")
     try:
         subprocess.run([findlog_path, tid, "-x"], cwd=script_dir, check=True)
     except subprocess.CalledProcessError as e:
         print(f"findlog.sh failed with code {e.returncode} for {tid}")
-        return None
+        return None, None
 
     log_path = find_latest_shipperws_log(script_dir, tid)
     if not log_path:
         print(f"No shipperws log found for token '{tid}' under logs/.")
-        return None
+        return None, None
 
     print(f"Using latest shipperws log: {log_path}")
     print(f"Processing: {log_path}")
 
     try:
         summary = parse_log_file(log_path)
-        return generate_report(summary)
+        return generate_report(summary), summary.get("LogTimestamp")
     except Exception as e:
         print(f"\nERROR processing {tid}: {e}")
-        return None
+        return None, None
 
 
 def run_batch(ids, script_dir, ids_source_path):
     """Process a list of SHQ IDs and write all reports into one combined file."""
-    entries = []  # list of (timestamp_str, section_text)
+    entries = []  # list of (sort_key, section_text)
     ok = fail = 0
     for shq_id in ids:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report = process_one(shq_id, script_dir)
+        report, log_ts = process_one(shq_id, script_dir)
+        display_ts = log_ts or "N/A"
+        sort_key = log_ts or "9999"  # entries without a timestamp sort last
         if report is not None:
-            sections_text = f"{'=' * 60}\nID: {shq_id}  |  Timestamp: {ts}\n{'=' * 60}\n{report}"
+            sections_text = f"{'=' * 60}\nID: {shq_id}  |  Timestamp: {display_ts}\n{'=' * 60}\n{report}"
             ok += 1
         else:
-            sections_text = f"{'=' * 60}\nID: {shq_id}  |  Timestamp: {ts}\n{'=' * 60}\nERROR: could not generate report for this ID."
+            sections_text = f"{'=' * 60}\nID: {shq_id}  |  Timestamp: {display_ts}\n{'=' * 60}\nERROR: could not generate report for this ID."
             fail += 1
-        entries.append((ts, sections_text))
+        entries.append((sort_key, sections_text))
 
     # Sort from earliest to oldest
     entries.sort(key=lambda e: e[0])
@@ -935,7 +954,7 @@ if __name__ == "__main__":
 
         # ── Single SHQ transaction ID ─────────────────────────────────────────
         else:
-            report = process_one(arg, script_dir)
+            report, _ = process_one(arg, script_dir)
             if report is None:
                 sys.exit(1)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
