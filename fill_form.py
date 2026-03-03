@@ -782,13 +782,32 @@ def generate_report(summary):
 #   FILE PICKER
 # ======================================================================
 
+_SHQ_ID_RE = re.compile(r"SHQ_\d{8}_\d{4}_shipperws_\d+_\d+")
+
+
 def pick_file():
     root = tk.Tk()
     root.withdraw()
     return filedialog.askopenfilename(
-        title="Select Log File",
-        filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")]
+        title="Select a log file  –OR–  unique_SHQ_IDs.txt for batch mode",
+        filetypes=[("Log files", "*.log"), ("ID / Text files", "*.txt"), ("All files", "*.*")]
     )
+
+
+def file_is_shq_ids(path):
+    """Return True if the file looks like a list of SHQ IDs rather than a log."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(4096)
+        ids = _SHQ_ID_RE.findall(head)
+        # If the first non-empty lines are all SHQ IDs, treat as IDs file
+        lines = [l.strip() for l in head.splitlines() if l.strip()]
+        if not lines:
+            return False
+        sample = lines[:min(5, len(lines))]
+        return all(_SHQ_ID_RE.fullmatch(l) for l in sample)
+    except Exception:
+        return False
 
 
 def find_latest_shipperws_log(base_dir, token):
@@ -819,42 +838,137 @@ def find_latest_shipperws_log(base_dir, token):
 
 
 # ======================================================================
+#   SINGLE-ID PROCESSING HELPER
+# ======================================================================
+
+def process_one(tid, script_dir):
+    """
+    Fetch logs for a single SHQ transaction ID, parse, and return the report
+    string.  Returns None on failure.
+    """
+    findlog_path = os.path.join(script_dir, "findlog.sh")
+    if not os.path.isfile(findlog_path):
+        print(f"Cannot find findlog.sh at {findlog_path}")
+        return None
+
+    print(f"\nFetching logs via findlog.sh for {tid} ...")
+    try:
+        subprocess.run([findlog_path, tid, "-x"], cwd=script_dir, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"findlog.sh failed with code {e.returncode} for {tid}")
+        return None
+
+    log_path = find_latest_shipperws_log(script_dir, tid)
+    if not log_path:
+        print(f"No shipperws log found for token '{tid}' under logs/.")
+        return None
+
+    print(f"Using latest shipperws log: {log_path}")
+    print(f"Processing: {log_path}")
+
+    try:
+        summary = parse_log_file(log_path)
+        return generate_report(summary)
+    except Exception as e:
+        print(f"\nERROR processing {tid}: {e}")
+        return None
+
+
+def run_batch(ids, script_dir, ids_source_path):
+    """Process a list of SHQ IDs and write all reports into one combined file."""
+    entries = []  # list of (timestamp_str, section_text)
+    ok = fail = 0
+    for shq_id in ids:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report = process_one(shq_id, script_dir)
+        if report is not None:
+            sections_text = f"{'=' * 60}\nID: {shq_id}  |  Timestamp: {ts}\n{'=' * 60}\n{report}"
+            ok += 1
+        else:
+            sections_text = f"{'=' * 60}\nID: {shq_id}  |  Timestamp: {ts}\n{'=' * 60}\nERROR: could not generate report for this ID."
+            fail += 1
+        entries.append((ts, sections_text))
+
+    # Sort from earliest to oldest
+    entries.sort(key=lambda e: e[0])
+    combined = "\n\n".join(text for _, text in entries)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(os.path.dirname(os.path.abspath(ids_source_path)), f"batch_rate_analysis_{ts}.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(combined)
+
+    print(f"\nBatch complete: {ok} succeeded, {fail} failed.")
+    print(f"Combined report saved to: {out_path}")
+    subprocess.Popen(["open", out_path])
+    return ok, fail
+
+
+# ======================================================================
 #   MAIN
 # ======================================================================
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
+
     log_path = None
 
-    # support drag-and-drop (argv) or file picker
     if len(sys.argv) > 1:
         arg = sys.argv[1]
-        # If a file path was provided directly, use it
-        if os.path.isfile(arg):
+
+        # ── Batch mode: arg is the unique_SHQ_IDs.txt file ──────────────────
+        ids_file = os.path.join(script_dir, "unique_SHQ_IDs.txt")
+        if os.path.abspath(arg) == os.path.abspath(ids_file) or arg == "unique_SHQ_IDs.txt":
+            with open(ids_file, "r") as f:
+                ids = [line.strip() for line in f if line.strip()]
+
+            if not ids:
+                print(f"No IDs found in {ids_file}.")
+                sys.exit(1)
+
+            print(f"Batch mode: processing {len(ids)} IDs from {ids_file}")
+            ok, fail = run_batch(ids, script_dir, ids_file)
+            sys.exit(0 if fail == 0 else 1)
+
+        # ── Direct log file path provided ────────────────────────────────────
+        elif os.path.isfile(arg):
             log_path = arg
+
+        # ── Single SHQ transaction ID ─────────────────────────────────────────
         else:
-            # Treat arg as transaction/token, run findlog.sh, then pick newest shipperws log
-            tid = arg
-            findlog_path = os.path.join(script_dir, "findlog.sh")
-            if not os.path.isfile(findlog_path):
-                print(f"Cannot find findlog.sh at {findlog_path}")
+            report = process_one(arg, script_dir)
+            if report is None:
                 sys.exit(1)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = os.path.join(script_dir, f"rate_analysis_{ts}.txt")
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(report)
+            print(f"Saved to: {out_path}")
+            subprocess.Popen(["open", out_path])
+            sys.exit(0)
 
-            print(f"Fetching logs via findlog.sh for {tid} ...")
-            try:
-                subprocess.run([findlog_path, tid, "-x"], cwd=script_dir, check=True)
-            except subprocess.CalledProcessError as e:
-                print("findlog.sh failed with code", e.returncode)
-                sys.exit(e.returncode)
-
-            log_path = find_latest_shipperws_log(script_dir, tid)
-            if not log_path:
-                print(f"No shipperws log found for token '{tid}' under logs/.")
-                sys.exit(1)
-            print(f"Using latest shipperws log: {log_path}")
     else:
-        print("Please select your log file...")
-        log_path = pick_file()
+        # ── No args → show file picker (log file OR IDs txt) ─────────────────
+        print("Please select a log file or unique_SHQ_IDs.txt for batch mode...")
+        picked = pick_file()
+
+        if not picked:
+            print("No file selected.")
+            sys.exit(0)
+
+        if file_is_shq_ids(picked):
+            # Treat as batch IDs file
+            with open(picked, "r", encoding="utf-8", errors="ignore") as f:
+                ids = [l.strip() for l in f if _SHQ_ID_RE.fullmatch(l.strip())]
+
+            if not ids:
+                print(f"No SHQ IDs found in {picked}.")
+                sys.exit(1)
+
+            print(f"Batch mode: processing {len(ids)} IDs from {picked}")
+            ok, fail = run_batch(ids, script_dir, picked)
+            sys.exit(0 if fail == 0 else 1)
+
+        log_path = picked
 
     if not log_path:
         print("No file selected.")
